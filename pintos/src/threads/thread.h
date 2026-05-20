@@ -4,7 +4,9 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+/* MLFQS Prototipi */
 
+void mlfqs_priority_control (void);
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -100,12 +102,18 @@ struct thread
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
+    int nice;                           /* Thread'in nice degeri */
+    int recent_cpu;                     /* Fixed-point formatinda son CPU */
   };
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+extern struct thread *idle_thread;
+extern int load_avg;
+
+
 
 void thread_init (void);
 void thread_start (void);
@@ -137,5 +145,10 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+void mlfqs_calculate_priority (struct thread *t, void *aux);
+void mlfqs_calculate_all_priorities (void);
+void mlfqs_update_load_avg (void);
+void mlfqs_update_recent_cpu (struct thread *t, void *aux);
 
 #endif /* threads/thread.h */
