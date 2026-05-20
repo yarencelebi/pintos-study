@@ -6,7 +6,9 @@
 #include "devices/pit.h"
 #include "threads/interrupt.h"
 #include "threads/synch.h"
+#include "threads/fixed-point.h"
 #include "threads/thread.h"
+
   
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -29,6 +31,7 @@ static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
+static struct semaphore timer_semaphore;
 
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
@@ -112,8 +115,7 @@ timer_usleep (int64_t us)
   real_time_sleep (us, 1000 * 1000);
 }
 
-/* Sleeps for approximately NS nanoseconds.  Interrupts must be
-   turned on. */
+/* Sleeps for approximately NS nanoseconds.  Interrupts must be turned on. */
 void
 timer_nsleep (int64_t ns) 
 {
@@ -165,14 +167,40 @@ timer_print_stats (void)
 {
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
-
-/* Timer interrupt handler. */
+/* Timer interrupt handler. */
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+
+  if (thread_mlfqs) 
+    {
+      struct thread *cur = thread_current();
+
+      /* 1. Her tikte mevcut thread'in recent_cpu degerini 1 artir (idle degilse) */
+      if (cur != idle_thread)
+        {
+          cur->recent_cpu = ADD_MIXED(cur->recent_cpu, 1); 
+        }
+
+      /* 2. Her 1 saniyede bir (TIMER_FREQ): load_avg ve tum recent_cpu'lari guncelle */
+      if (ticks % TIMER_FREQ == 0) 
+        {
+          mlfqs_update_load_avg ();
+          thread_foreach (mlfqs_update_recent_cpu, NULL);
+        }
+
+      /* 3. Her 4 tikta bir tum thread'lerin onceliklerini (priority) yeniden hesapla */
+      if (ticks % 4 == 0) 
+        {
+          mlfqs_calculate_all_priorities ();
+        }
+    }
+
+  sema_up (&timer_semaphore);
 }
+
 
 /* Returns true if LOOPS iterations waits for more than one timer
    tick, otherwise false. */
