@@ -88,12 +88,48 @@ timer_elapsed (int64_t then)
    be turned on. */
 void
 timer_sleep (int64_t ticks) 
-{
-  int64_t start = timer_ticks ();
+{ 
+void
+
+  /* Eğer uyuma süresi geçersizse (0 veya negatifse) hiçbir şey yapma */
+  if (ticks <= 0)
+    return;
+
+  ASSERT (intr_get_level () == INTR_ON);
+
+  /* Şu an çalışan thread'i alıyoruz */
+  struct thread *current_thread = thread_current ();
+
+  /* Kesmeleri (interrupts) kapatıyoruz; thread'i uyuturken araya başka işlem girmemeli */
+  enum intr_level old_level = intr_disable ();
+
+  /* Uyanma zamanını hesaplıyoruz: Şu anki zaman + uyuma süresi */
+  current_thread->wakeup_ticks = timer_ticks () + ticks;
+
+  /* Thread'i bloke ediyoruz (BLOCKED moduna alıyoruz). 
+     Böylece işlemci üzerinden kalkar ve hazır kuyruğundan çıkar. */
+  thread_block ();
+
+  /* Kesme seviyesini eski güvenli haline getirdik */
+  intr_set_level (old_level);
+
+ /* int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
   while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+    thread_yield ();*/
+}
+
+/* Sistemdeki her thread için çağrılacak ve zamanı gelenleri uyandıracak fonksiyon */
+static void 
+check_and_wakeup_thread (struct thread *t, void *aux UNUSED) 
+{
+  /* Eğer thread engellenmişse (BLOCKED) VE uyanma zamanı geldiyse veya geçtiyse */
+  if (t->status == THREAD_BLOCKED && timer_ticks () >= t->wakeup_ticks) 
+    {
+      /* Thread'i uykudan kaldır ve tekrar çalışmaya hazır (READY) hale getir */
+      thread_unblock (t);
+    }
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -172,6 +208,9 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+
+  /* Her zaman tikinde tüm thread'leri tek tek gez ve zamanı gelenleri uyandır */
+  thread_foreach (check_and_wakeup_thread, NULL);
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
