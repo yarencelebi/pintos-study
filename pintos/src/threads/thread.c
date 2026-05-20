@@ -14,6 +14,7 @@
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
+int load_avg;                           /* Fixed-point formatinda sistem yuk ortalamasi */
 
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
@@ -44,6 +45,10 @@ struct kernel_thread_frame
     thread_func *function;      /* Function to call. */
     void *aux;                  /* Auxiliary data for function. */
   };
+
+/* Gelişmiş Zamanlayıcı Prototipleri */
+void mlfqs_calculate_priority (struct thread *t, void *aux);
+void mlfqs_calculate_all_priorities (void);
 
 /* Statistics. */
 static long long idle_ticks;    /* # of timer ticks spent idle. */
@@ -98,6 +103,12 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+
+  
+
+  load_avg = 0;
+  initial_thread->nice = 0;
+  initial_thread->recent_cpu = 0;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -197,7 +208,11 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
-
+if (thread_mlfqs)
+    {
+t->nice = thread_current ()->nice;
+  t->recent_cpu = thread_current ()->recent_cpu;
+    }
   /* Add to run queue. */
   thread_unblock (t);
 
@@ -334,7 +349,8 @@ thread_foreach (thread_action_func *func, void *aux)
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) 
-{
+{if (thread_mlfqs)
+    return;
   thread_current ()->priority = new_priority;
 }
 
@@ -347,33 +363,78 @@ thread_get_priority (void)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int new_nice ) 
 {
-  /* Not yet implemented. */
+  if (!thread_mlfqs)
+    return;
+    
+  enum intr_level old_level = intr_disable ();
+  
+  /* Mevcut thread'in nice degerini guncelle */
+  thread_current ()->nice = new_nice;
+  
+  /* Nice degeri degisince oncelik hemen tekrar hesaplanmali */
+  mlfqs_calculate_priority (thread_current (), NULL);
+  
+  intr_set_level (old_level);
+  
+  /* Oncelik degistigi icin CPU'yu daha yuksek oncelikli biri varsa ona devret */
+  thread_yield ();
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+enum intr_level old_level = intr_disable ();
+  
+  /* Mevcut thread'in nice degerini aliyoruz */
+  int current_nice = thread_current ()->nice;
+  
+  intr_set_level (old_level);
+  
+  return current_nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+ enum intr_level old_level = intr_disable ();
+  
+  /* load_avg * 100 degerini fixed-point kurallarina gore (f = 1 << 14) yuvarlayarak hesapliyoruz */
+  long long scaled = (long long) load_avg * 100;
+  int rounded_load_avg;
+
+  if (scaled >= 0)
+    rounded_load_avg = (scaled + (1 << 13)) / (1 << 14);
+  else
+    rounded_load_avg = (scaled - (1 << 13)) / (1 << 14);
+
+  intr_set_level (old_level);
+  
+  return rounded_load_avg;
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  enum intr_level old_level = intr_disable ();
+  
+  /* Mevcut thread'in recent_cpu degerini 100 ile carpiyoruz */
+  long long scaled = (long long) thread_current ()->recent_cpu * 100;
+  int rounded_recent_cpu;
+
+  /* Fixed-point (f = 1 << 14) kurallarina gore en yakin tam sayiya yuvarlama */
+  if (scaled >= 0)
+    rounded_recent_cpu = (scaled + (1 << 13)) / (1 << 14);
+  else
+    rounded_recent_cpu = (scaled - (1 << 13)) / (1 << 14);
+
+  intr_set_level (old_level);
+  
+  return rounded_recent_cpu;
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -463,6 +524,19 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+
+if (thread_mlfqs)
+    {
+      int fp_recent_div_4 = t->recent_cpu / 4; 
+      int int_recent_div_4 = fp_recent_div_4 / (1 << 14); 
+      int new_priority = PRI_MAX - int_recent_div_4 - (t->nice * 2);
+
+      /* Sınırları kontrol ediyoruz (0 ile 63 arasında kalmalı) */
+      if (new_priority > PRI_MAX) new_priority = PRI_MAX;
+      if (new_priority < PRI_MIN) new_priority = PRI_MIN;
+
+      t->priority = new_priority;
+    }
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
@@ -582,3 +656,39 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+
+/* Bir thread'in MLFQS onceligini formüle gore hesaplar */
+void
+mlfqs_calculate_priority (struct thread *t, void *aux UNUSED)
+{
+  if (t == idle_thread)
+    return;
+
+  /* Formul: priority = PRI_MAX - (recent_cpu / 4) - (nice * 2) */
+  /* NOT: recent_cpu sabit noktali (fixed-point) oldugu icin once tam sayiya donusturulmeli */
+  int fp_recent_div_4 = t->recent_cpu / 4; 
+  int int_recent_div_4 = fp_recent_div_4 / (1 << 14); // 16.16 veya 17.14 formatina gore bolme
+  
+  int new_priority = PRI_MAX - int_recent_div_4 - (t->nice * 2);
+
+  if (new_priority > PRI_MAX)
+    new_priority = PRI_MAX;
+  if (new_priority < PRI_MIN)
+    new_priority = PRI_MIN;
+
+  t->priority = new_priority;
+}
+
+/* Tum thread'lerin onceliklerini yeniden hesaplar */
+void
+mlfqs_calculate_all_priorities (void)
+{
+  thread_foreach (mlfqs_calculate_priority, NULL);
+}
+
+
+
+
+
+
